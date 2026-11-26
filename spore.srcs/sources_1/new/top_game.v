@@ -361,7 +361,13 @@ module top_game (
     localparam WORLD_MAX = 12'd2048;
     reg  [11:0] player_wx, player_wy;
     reg signed [7:0] vx, vy;
-    reg  [1:0]  facing_dir; // 0:UP, 1:RIGHT, 2:DOWN, 3:LEFT
+    // Keep the original cardinal codes; add NE, SE, SW, NW as 4..7.
+    reg  [2:0]  facing_dir;
+    // Opposite buttons cancel on each axis, for both facing and movement.
+    wire move_up    = up_s    && !down_s;
+    wire move_down  = down_s  && !up_s;
+    wire move_left  = left_s  && !right_s;
+    wire move_right = right_s && !left_s;
 
     wire signed [13:0] next_wx = $signed({2'b00, player_wx}) + (vx >>> 2);
     wire signed [13:0] next_wy = $signed({2'b00, player_wy}) + (vy >>> 2);
@@ -373,19 +379,26 @@ module top_game (
             player_wy  <= 12'd1024;
             vx         <= 8'sd0;
             vy         <= 8'sd0;
-            facing_dir <= 2'd1;
+            facing_dir <= 3'd1;
         end else if (frame_tick && run_state == 2'd1) begin
-            if (up_s)         facing_dir <= 2'd0;
-            else if (right_s) facing_dir <= 2'd1;
-            else if (down_s)  facing_dir <= 2'd2;
-            else if (left_s)  facing_dir <= 2'd3;
+            case ({move_up, move_down, move_left, move_right})
+                4'b1000: facing_dir <= 3'd0; // N
+                4'b0001: facing_dir <= 3'd1; // E
+                4'b0100: facing_dir <= 3'd2; // S
+                4'b0010: facing_dir <= 3'd3; // W
+                4'b1001: facing_dir <= 3'd4; // NE
+                4'b0101: facing_dir <= 3'd5; // SE
+                4'b0110: facing_dir <= 3'd6; // SW
+                4'b1010: facing_dir <= 3'd7; // NW
+                default: ; // Released/cancelled input keeps the last facing.
+            endcase
 
-            if (left_s && vx > -max_speed)       vx <= vx - accel;
-            else if (right_s && vx < max_speed)  vx <= vx + accel;
+            if (move_left && vx > -max_speed)       vx <= vx - accel;
+            else if (move_right && vx < max_speed)  vx <= vx + accel;
             else                                 vx <= vx - (vx >>> 3);
 
-            if (up_s && vy > -max_speed)         vy <= vy - accel;
-            else if (down_s && vy < max_speed)   vy <= vy + accel;
+            if (move_up && vy > -max_speed)         vy <= vy - accel;
+            else if (move_down && vy < max_speed)   vy <= vy + accel;
             else                                 vy <= vy - (vy >>> 3);
 
             if (next_wx < 14'sd16) begin

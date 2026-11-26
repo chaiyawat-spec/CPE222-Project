@@ -44,7 +44,7 @@ module ecosystem_ai_and_collision #(
     input  wire [11:0]  player_wx,
     input  wire [11:0]  player_wy,
     input  wire [7:0]   player_size,
-    input  wire [1:0]   facing_dir,
+    input  wire [2:0]   facing_dir, // N,E,S,W,NE,SE,SW,NW
     input  wire [2:0]   form_state,
     input  wire         is_god_mode,
     input  wire         is_carnivore,   // 1 = carnivore (DNA from kills), 0 = herbivore (DNA from rocks)
@@ -172,14 +172,30 @@ module ecosystem_ai_and_collision #(
     endfunction
 
     wire [7:0]  spike_len = spike_unlocked ? ((player_size >> 1) + 8'd8) : 8'd0;
-    wire [11:0] spk_x = (facing_dir == 2'd1) ? (player_wx + {4'd0, player_size}) :
-                        (facing_dir == 2'd3) ? ((player_wx > {4'd0, spike_len}) ? (player_wx - {4'd0, spike_len}) : 12'd0) :
+    // Diagonals use the conservative AABB of the rotated front rectangle.
+    // Its centre follows the nose; cardinal hit boxes keep their old dimensions.
+    wire [17:0] spk_diag_offset_mul = ({10'd0, player_size} + {10'd0, spike_len}) * 18'd181;
+    wire [17:0] spk_diag_half_mul = ({10'd0, spike_len} + {11'd0, player_size[7:1]}) * 18'd181 + 18'd511;
+    wire [11:0] spk_diag_offset = spk_diag_offset_mul >> 9;
+    wire [7:0] spk_diag_half = spk_diag_half_mul >> 9;
+    wire spk_east = (facing_dir == 3'd4) || (facing_dir == 3'd5);
+    wire spk_south = (facing_dir == 3'd5) || (facing_dir == 3'd6);
+    wire signed [13:0] spk_diag_x = $signed({2'd0, player_wx}) + $signed({7'd0, player_size[7:1]}) +
+        (spk_east ? $signed({2'd0, spk_diag_offset}) : -$signed({2'd0, spk_diag_offset})) - $signed({6'd0, spk_diag_half});
+    wire signed [13:0] spk_diag_y = $signed({2'd0, player_wy}) + $signed({7'd0, player_size[7:1]}) +
+        (spk_south ? $signed({2'd0, spk_diag_offset}) : -$signed({2'd0, spk_diag_offset})) - $signed({6'd0, spk_diag_half});
+    wire [11:0] spk_x = facing_dir[2] ? ((spk_diag_x < 0) ? 12'd0 : spk_diag_x[11:0]) :
+                        (facing_dir == 3'd1) ? (player_wx + {4'd0, player_size}) :
+                        (facing_dir == 3'd3) ? ((player_wx > {4'd0, spike_len}) ? (player_wx - {4'd0, spike_len}) : 12'd0) :
                                                (player_wx + {6'd0, player_size[7:2]});
-    wire [11:0] spk_y = (facing_dir == 2'd2) ? (player_wy + {4'd0, player_size}) :
-                        (facing_dir == 2'd0) ? ((player_wy > {4'd0, spike_len}) ? (player_wy - {4'd0, spike_len}) : 12'd0) :
+    wire [11:0] spk_y = facing_dir[2] ? ((spk_diag_y < 0) ? 12'd0 : spk_diag_y[11:0]) :
+                        (facing_dir == 3'd2) ? (player_wy + {4'd0, player_size}) :
+                        (facing_dir == 3'd0) ? ((player_wy > {4'd0, spike_len}) ? (player_wy - {4'd0, spike_len}) : 12'd0) :
                                                (player_wy + {6'd0, player_size[7:2]});
-    wire [7:0]  spk_w = (facing_dir == 2'd1 || facing_dir == 2'd3) ? spike_len : (player_size >> 1);
-    wire [7:0]  spk_h = (facing_dir == 2'd0 || facing_dir == 2'd2) ? spike_len : (player_size >> 1);
+    wire [7:0]  spk_w = facing_dir[2] ? (spk_diag_half << 1) :
+                       (facing_dir == 3'd1 || facing_dir == 3'd3) ? spike_len : (player_size >> 1);
+    wire [7:0]  spk_h = facing_dir[2] ? (spk_diag_half << 1) :
+                       (facing_dir == 3'd0 || facing_dir == 3'd2) ? spike_len : (player_size >> 1);
 
     function check_aabb_rect;
         input [11:0] ax, ay;
