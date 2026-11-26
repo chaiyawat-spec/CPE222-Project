@@ -369,14 +369,42 @@ module top_game (
     wire move_left  = left_s  && !right_s;
     wire move_right = right_s && !left_s;
 
-    wire signed [13:0] next_wx = $signed({2'b00, player_wx}) + (vx >>> 2);
-    wire signed [13:0] next_wy = $signed({2'b00, player_wy}) + (vy >>> 2);
+    // Velocity is in quarter pixels. Scale both axes by 181/256 (~1/sqrt(2))
+    // when moving diagonally and retain subpixels across frames.
+    reg [9:0] player_frac_x, player_frac_y;
+    wire diagonal_velocity = (vx != 8'sd0) && (vy != 8'sd0);
+    wire signed [16:0] step_x = diagonal_velocity ? vx * 17'sd181 : vx * 17'sd256;
+    wire signed [16:0] step_y = diagonal_velocity ? vy * 17'sd181 : vy * 17'sd256;
+    wire signed [22:0] next_x_fp = $signed({1'b0, player_wx, player_frac_x}) + step_x;
+    wire signed [22:0] next_y_fp = $signed({1'b0, player_wy, player_frac_y}) + step_y;
+    wire signed [13:0] next_wx = next_x_fp >>> 10;
+    wire signed [13:0] next_wy = next_y_fp >>> 10;
+
+    function automatic signed [7:0] update_velocity;
+        input signed [7:0] velocity;
+        input move_negative, move_positive;
+        input signed [7:0] speed_limit;
+        reg signed [7:0] magnitude;
+        begin
+            magnitude = velocity < 0 ? -velocity : velocity;
+            if (move_negative)
+                update_velocity = (velocity <= -speed_limit + accel) ? -speed_limit : velocity - accel;
+            else if (move_positive)
+                update_velocity = (velocity >= speed_limit - accel) ? speed_limit : velocity + accel;
+            else if (magnitude < 8'sd8)
+                update_velocity = 8'sd0;
+            else
+                update_velocity = velocity < 0 ? velocity + (magnitude >>> 3) : velocity - (magnitude >>> 3);
+        end
+    endfunction
 
     // synchronous reset so run_state never drives an async reset pin
     always @(posedge clk_25m) begin
         if (game_rst || run_state == 2'd0) begin
             player_wx  <= 12'd1024;
             player_wy  <= 12'd1024;
+            player_frac_x <= 10'd0;
+            player_frac_y <= 10'd0;
             vx         <= 8'sd0;
             vy         <= 8'sd0;
             facing_dir <= 3'd1;
@@ -393,32 +421,33 @@ module top_game (
                 default: ; // Released/cancelled input keeps the last facing.
             endcase
 
-            if (move_left && vx > -max_speed)       vx <= vx - accel;
-            else if (move_right && vx < max_speed)  vx <= vx + accel;
-            else                                 vx <= vx - (vx >>> 3);
-
-            if (move_up && vy > -max_speed)         vy <= vy - accel;
-            else if (move_down && vy < max_speed)   vy <= vy + accel;
-            else                                 vy <= vy - (vy >>> 3);
+            vx <= update_velocity(vx, move_left, move_right, max_speed);
+            vy <= update_velocity(vy, move_up, move_down, max_speed);
 
             if (next_wx < 14'sd16) begin
                 player_wx <= 12'd16;
+                player_frac_x <= 10'd0;
                 vx <= 8'sd0;
             end else if (next_wx > $signed({2'b00, WORLD_MAX - {4'd0, player_size} - 12'd16})) begin
                 player_wx <= WORLD_MAX - {4'd0, player_size} - 12'd16;
+                player_frac_x <= 10'd0;
                 vx <= 8'sd0;
             end else begin
                 player_wx <= next_wx[11:0];
+                player_frac_x <= next_x_fp[9:0];
             end
 
             if (next_wy < 14'sd16) begin
                 player_wy <= 12'd16;
+                player_frac_y <= 10'd0;
                 vy <= 8'sd0;
             end else if (next_wy > $signed({2'b00, WORLD_MAX - {4'd0, player_size} - 12'd16})) begin
                 player_wy <= WORLD_MAX - {4'd0, player_size} - 12'd16;
+                player_frac_y <= 10'd0;
                 vy <= 8'sd0;
             end else begin
                 player_wy <= next_wy[11:0];
+                player_frac_y <= next_y_fp[9:0];
             end
         end
     end
