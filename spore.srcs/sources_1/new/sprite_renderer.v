@@ -13,7 +13,7 @@ module sprite_renderer #(
     input  wire [1:0]   game_state,
     input  wire [2:0]   form_state,
     input  wire [3:0]   unlocked_skills, // [0]:Dash, [1]:Spike, [2]:Shock, [3]:Poison
-    input  wire [1:0]   facing_dir,
+    input  wire [2:0]   facing_dir, // N,E,S,W,NE,SE,SW,NW
     input  wire         is_carnivore,    // 1 = carnivore body
     input  wire [3:0]   egg_taps,        // egg pictures 0..9
     input  wire         egg_fx,          // sparkle effect on the egg
@@ -341,7 +341,8 @@ module sprite_renderer #(
     reg [2:0] kA1, anA1, kB1, etB1;
     reg [7:0] oxA1, oyA1, oxB1, oyB1;
     reg [3:0] egA1, selB1;
-    reg [1:0] faceA1, pkB1;
+    reg [2:0] faceA1;
+    reg [1:0] pkB1;
     reg [4:0] nA1;
     reg       mvA1, boss_hit1, boss_hit2, boss_hit3;
     always @(posedge clk_25m) begin
@@ -389,7 +390,8 @@ module sprite_renderer #(
     reg [2:0] kA2, anA2, kB2, etB2;
     reg [6:0] txA2, tyA2, txB2, tyB2;
     reg [3:0] egA2;
-    reg [1:0] faceA2, pkB2;
+    reg [2:0] faceA2;
+    reg [1:0] pkB2;
     reg [4:0] nA2;
     reg       mvA2;
     always @(posedge clk_25m) begin
@@ -400,15 +402,43 @@ module sprite_renderer #(
 
     // ---- clock 2: build the addresses ----
     // Player: the picture has its head up. Turn it so the head points where the player faces.
-    reg [5:0] sx, sy;
+    // Inverse rotation about (23.5,23.5). Doubled coordinates keep the
+    // half-texel centre exact; 181/256 approximates 1/sqrt(2).
+    // Signed intermediates and bounds checks make outside texels transparent,
+    // rather than wrapping them into a neighbouring sprite in the atlas.
+    wire signed [8:0] rx2 = $signed({1'b0, txA2, 1'b0}) - 9'sd47;
+    wire signed [8:0] ry2 = $signed({1'b0, tyA2, 1'b0}) - 9'sd47;
+    wire signed [17:0] diag_sum  = (rx2 + ry2) * 18'sd181;
+    wire signed [17:0] diag_diff = (ry2 - rx2) * 18'sd181;
+    reg signed [8:0] rot_x, rot_y;
     always @(*) begin
         case (faceA2)
-            2'd0:    begin sx = txA2[5:0];         sy = tyA2[5:0];         end   // up
-            2'd1:    begin sx = tyA2[5:0];         sy = 6'd47 - txA2[5:0]; end   // right
-            2'd2:    begin sx = 6'd47 - txA2[5:0]; sy = 6'd47 - tyA2[5:0]; end   // down
-            default: begin sx = 6'd47 - tyA2[5:0]; sy = txA2[5:0];         end   // left
+            3'd0: begin rot_x = txA2;         rot_y = tyA2;         end // N
+            3'd1: begin rot_x = tyA2;         rot_y = 9'sd47-txA2; end // E
+            3'd2: begin rot_x = 9'sd47-txA2; rot_y = 9'sd47-tyA2; end // S
+            3'd3: begin rot_x = 9'sd47-tyA2; rot_y = txA2;         end // W
+            3'd4: begin // NE
+                rot_x = (18'sd12288 + diag_sum)  >>> 9;
+                rot_y = (18'sd12288 + diag_diff) >>> 9;
+            end
+            3'd5: begin // SE
+                rot_x = (18'sd12288 + diag_diff) >>> 9;
+                rot_y = (18'sd12288 - diag_sum)  >>> 9;
+            end
+            3'd6: begin // SW
+                rot_x = (18'sd12288 - diag_sum)  >>> 9;
+                rot_y = (18'sd12288 - diag_diff) >>> 9;
+            end
+            default: begin // NW
+                rot_x = (18'sd12288 - diag_diff) >>> 9;
+                rot_y = (18'sd12288 + diag_sum)  >>> 9;
+            end
         endcase
     end
+    wire rot_ok = (rot_x >= 9'sd0) && (rot_x <= 9'sd47) &&
+                  (rot_y >= 9'sd0) && (rot_y <= 9'sd47);
+    wire [5:0] sx = rot_x[5:0];
+    wire [5:0] sy = rot_y[5:0];
 
     // sway: idle = the tail tip sways a little; moving = the whole rear half swims, faster and wider
     wire [2:0] wi = anA2 + sy[4:2];
@@ -438,7 +468,7 @@ module sprite_renderer #(
         art_okA   = 1'b0;
         case (kA2)
             K_PLAYER: begin
-                art_okA   = sx_ok;
+                art_okA   = rot_ok && sx_ok;
                 art_addrA = ({13'd0, nA2} << 11) + ({13'd0, nA2} << 8) +
                             ({12'd0, sy} << 5) + ({12'd0, sy} << 4) + {12'd0, sxu};
             end
@@ -610,52 +640,34 @@ module sprite_renderer #(
 
     reg in_dir_arrow;
     reg in_front_spike;
-    reg [11:0] off;
+    wire signed [13:0] marker_dx = $signed({2'd0, world_x_d3}) - $signed({2'd0, p_cx});
+    wire signed [13:0] marker_dy = $signed({2'd0, world_y_d3}) - $signed({2'd0, p_cy});
+    reg signed [21:0] marker_forward, marker_side;
+    wire signed [21:0] marker_start = $signed({15'd0, player_size[7:1]});
     always @(*) begin
+        // Project into the player's local axes, including diagonal debug markers.
+        case (facing_dir)
+            3'd0: begin marker_forward = -marker_dy; marker_side = marker_dx; end
+            3'd1: begin marker_forward = marker_dx;  marker_side = marker_dy; end
+            3'd2: begin marker_forward = marker_dy;  marker_side = marker_dx; end
+            3'd3: begin marker_forward = -marker_dx; marker_side = marker_dy; end
+            3'd4: begin marker_forward = ((marker_dx-marker_dy)*22'sd181) >>> 8;
+                        marker_side = ((marker_dx+marker_dy)*22'sd181) >>> 8; end
+            3'd5: begin marker_forward = ((marker_dx+marker_dy)*22'sd181) >>> 8;
+                        marker_side = ((marker_dx-marker_dy)*22'sd181) >>> 8; end
+            3'd6: begin marker_forward = ((-marker_dx+marker_dy)*22'sd181) >>> 8;
+                        marker_side = ((marker_dx+marker_dy)*22'sd181) >>> 8; end
+            default: begin marker_forward = ((-marker_dx-marker_dy)*22'sd181) >>> 8;
+                           marker_side = ((marker_dx-marker_dy)*22'sd181) >>> 8; end
+        endcase
         in_dir_arrow   = 1'b0;
         in_front_spike = 1'b0;
-        off            = 12'd0;
-        if (form_state != 3'd0) begin
-            case (facing_dir)
-                2'd0: begin
-                    if ((world_y_d3 < player_wy) && (world_y_d3 + 12'd10 >= player_wy)) begin
-                        off = player_wy - world_y_d3;
-                        if ((world_x_d3 + (12'd10 - off) >= p_cx) && (world_x_d3 <= p_cx + (12'd10 - off))) begin
-                            if (unlocked_skills[1]) in_front_spike = 1'b1;
-                            else                    in_dir_arrow   = 1'b1;
-                        end
-                    end
-                end
-                2'd1: begin
-                    if ((world_x_d3 >= player_wx + {4'd0, player_size}) &&
-                        (world_x_d3 <  player_wx + {4'd0, player_size} + 12'd10)) begin
-                        off = world_x_d3 - (player_wx + {4'd0, player_size});
-                        if ((world_y_d3 + (12'd9 - off) >= p_cy) && (world_y_d3 <= p_cy + (12'd9 - off))) begin
-                            if (unlocked_skills[1]) in_front_spike = 1'b1;
-                            else                    in_dir_arrow   = 1'b1;
-                        end
-                    end
-                end
-                2'd2: begin
-                    if ((world_y_d3 >= player_wy + {4'd0, player_size}) &&
-                        (world_y_d3 <  player_wy + {4'd0, player_size} + 12'd10)) begin
-                        off = world_y_d3 - (player_wy + {4'd0, player_size});
-                        if ((world_x_d3 + (12'd9 - off) >= p_cx) && (world_x_d3 <= p_cx + (12'd9 - off))) begin
-                            if (unlocked_skills[1]) in_front_spike = 1'b1;
-                            else                    in_dir_arrow   = 1'b1;
-                        end
-                    end
-                end
-                2'd3: begin
-                    if ((world_x_d3 < player_wx) && (world_x_d3 + 12'd10 >= player_wx)) begin
-                        off = player_wx - world_x_d3;
-                        if ((world_y_d3 + (12'd10 - off) >= p_cy) && (world_y_d3 <= p_cy + (12'd10 - off))) begin
-                            if (unlocked_skills[1]) in_front_spike = 1'b1;
-                            else                    in_dir_arrow   = 1'b1;
-                        end
-                    end
-                end
-            endcase
+        if ((form_state != 3'd0) && (marker_forward >= marker_start) &&
+            (marker_forward < marker_start + 22'sd10) &&
+            (marker_side <= marker_start + 22'sd9 - marker_forward) &&
+            (marker_side >= -(marker_start + 22'sd9 - marker_forward))) begin
+            if (unlocked_skills[1]) in_front_spike = 1'b1;
+            else                    in_dir_arrow   = 1'b1;
         end
     end
 
